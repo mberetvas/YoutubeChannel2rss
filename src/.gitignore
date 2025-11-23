@@ -5,3 +5,5 @@ main.spec
 /.venv
 /.Ruff
 /.idea
+__pycache__/
+*.pyc
