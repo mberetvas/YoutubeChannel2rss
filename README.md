@@ -16,6 +16,7 @@ This script converts a YouTube channel URL to an RSS feed URL and fetches the la
 - **Filter by date** - Filter videos published on a specific date (exact match)
 - **Filter by title** - Filter videos containing specific keywords in the title
 - **Date range filtering** - Filter videos published after/before specific dates (`--after`, `--before`)
+- **Duration filtering** - Filter videos by length using `--min-duration` and `--max-duration` (in seconds)
 - **Multiple filters** - Combine multiple filters using AND logic for precise results
 
 ### Performance & Reliability
@@ -91,6 +92,11 @@ options:
   --dry-run             Preview what would be fetched without making requests
   --no-cache            Disable channel ID caching
   --clear-cache         Clear the channel ID cache and exit
+  --min-duration SECONDS
+                        Filter videos with minimum duration in seconds
+  --max-duration SECONDS
+                        Filter videos with maximum duration in seconds
+  --show-duration       Include video duration in the output
 ```
 
 ## Examples
@@ -146,6 +152,26 @@ python src/main.py https://www.youtube.com/@channelname --output csv
 Fetch more videos (e.g., 15 instead of default 5):
 ```sh
 python src/main.py https://www.youtube.com/@channelname --limit 15
+```
+
+Show video duration in the output:
+```sh
+python src/main.py https://www.youtube.com/@channelname --show-duration
+```
+
+Filter videos by minimum duration (e.g., longer than 10 minutes = 600 seconds):
+```sh
+python src/main.py https://www.youtube.com/@channelname --min-duration 600
+```
+
+Filter videos by maximum duration (e.g., shorter than 5 minutes = 300 seconds):
+```sh
+python src/main.py https://www.youtube.com/@channelname --max-duration 300
+```
+
+Combine duration filters (e.g., videos between 5-15 minutes):
+```sh
+python src/main.py https://www.youtube.com/@channelname --min-duration 300 --max-duration 900 --show-duration
 ```
 
 Save RSS URL to a file for automation:
