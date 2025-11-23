@@ -28,8 +28,13 @@ Example:
     --filter_value 2023-10-01
 """
 
+__version__ = "1.0.0"
+
 import re
 import argparse
+import json
+import csv
+import sys
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup, FeatureNotFound, ResultSet, PageElement, Tag, NavigableString
@@ -51,8 +56,24 @@ def get_youtube_source_code(url: str) -> bytes | None:
         response = requests.get(url, timeout=10)
         response.raise_for_status()  # Check for bad status codes
         return response.content
+    except requests.exceptions.Timeout:
+        print(f"Error: Request timed out while fetching URL: {url}")
+        print("Suggestion: Check your internet connection or try again later.")
+        return None
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            print(f"Error: YouTube page not found (404): {url}")
+            print("Suggestion: Verify the URL is correct and the channel exists.")
+        else:
+            print(f"Error: HTTP error {e.response.status_code} while fetching URL: {url}")
+        return None
+    except requests.exceptions.ConnectionError:
+        print(f"Error: Connection error while fetching URL: {url}")
+        print("Suggestion: Check your internet connection.")
+        return None
     except requests.exceptions.RequestException as e:
         print(f"Error fetching URL: {e}")
+        print("Suggestion: Check the URL format and try again.")
         return None
 
 
@@ -75,15 +96,25 @@ def get_youtube_channel_id(html_source_code: bytes | None) -> str | None:
     meta_tag = soup.find("meta", property="og:url")
     if meta_tag:
         og_url = meta_tag.get("content")
+        # Support both /channel/ and /@handle URLs
         match = re.search(r"/channel/([UC][a-zA-Z0-9_-]+)", og_url)
         if match:
             return match.group(1)
+        # Check if this is a handle URL - the channel ID might be elsewhere
+        handle_match = re.search(r"/@([a-zA-Z0-9_-]+)", og_url)
+        if handle_match:
+            # Continue to other methods to find the actual channel ID
+            pass
 
     # Method 2: Script tags (fallback)
     script_tags = soup.find_all("script")
     for script in script_tags:
         script_content = str(script)
         match = re.search(r"\"channel_id\":\"([UC][a-zA-Z0-9_-]+)\"", script_content)
+        if match:
+            return match.group(1)
+        # Also look for channelId pattern
+        match = re.search(r"\"channelId\":\"([UC][a-zA-Z0-9_-]+)\"", script_content)
         if match:
             return match.group(1)
 
@@ -132,6 +163,20 @@ def fetch_rss_feed_content(
             return None
         _entries = soup.find_all("entry")[:limit]
         return _entries
+    except requests.exceptions.Timeout:
+        print(f"Error: Request timed out while fetching RSS feed: {feed_url}")
+        print("Suggestion: Check your internet connection or try again later.")
+        return None
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            print(f"Error: RSS feed not found (404): {feed_url}")
+            print("Suggestion: The channel might not have any videos or the feed is unavailable.")
+        elif e.response.status_code == 429:
+            print(f"Error: Rate limited (429) while fetching RSS feed: {feed_url}")
+            print("Suggestion: You're making too many requests. Wait a while before trying again.")
+        else:
+            print(f"Error: HTTP error {e.response.status_code} while fetching RSS feed: {feed_url}")
+        return None
     except requests.exceptions.RequestException as e:
         print(f"Error fetching RSS feed: {e}")
         return None
@@ -141,6 +186,8 @@ def filter_videos(
     param_entries: list[BeautifulSoup],
     filter_by: str | None = None,
     filter_value: str | None = None,
+    after_date: str | None = None,
+    before_date: str | None = None,
 ) -> list[dict[str, str]]:
     """
     Filters videos by date, title, or other metadata.
@@ -149,18 +196,32 @@ def filter_videos(
         param_entries (list): A list of BeautifulSoup 'entry' elements representing the videos.
         filter_by (str, optional): The criteria to filter videos by ('date' or 'title').
         filter_value (str, optional): The value to filter videos by. Defaults to None.
+        after_date (str, optional): Filter videos published after this date (YYYY-MM-DD).
+        before_date (str, optional): Filter videos published before this date (YYYY-MM-DD).
 
     Returns:
         list: A list of dictionaries containing filtered video details.
     """
     filtered_videos = []
+    
+    # Parse date range if provided
+    after_dt = datetime.strptime(after_date, "%Y-%m-%d").date() if after_date else None
+    before_dt = datetime.strptime(before_date, "%Y-%m-%d").date() if before_date else None
+    
     for entry in param_entries:
         title = entry.find("title").text
         published = entry.find("published").text
         link = entry.find("link")["href"]
+        entry_date = datetime.strptime(published, "%Y-%m-%dT%H:%M:%S%z")
+        
+        # Apply date range filters
+        if after_dt and entry_date.date() < after_dt:
+            continue
+        if before_dt and entry_date.date() > before_dt:
+            continue
 
+        # Apply legacy filters
         if filter_by == "date":
-            entry_date = datetime.strptime(published, "%Y-%m-%dT%H:%M:%S%z")
             filter_date = datetime.strptime(filter_value, "%Y-%m-%d")
             if entry_date.date() == filter_date.date():
                 filtered_videos.append({"title": title, "published": published, "link": link})
@@ -169,6 +230,28 @@ def filter_videos(
         elif not filter_by:
             filtered_videos.append({"title": title, "published": published, "link": link})
     return filtered_videos
+
+
+def format_output(videos: list[dict[str, str]], output_format: str = "text") -> None:
+    """
+    Format and display videos in the specified output format.
+
+    Args:
+        videos (list): A list of dictionaries containing video details.
+        output_format (str): The output format ('text', 'json', or 'csv').
+    """
+    if output_format == "json":
+        print(json.dumps(videos, indent=2))
+    elif output_format == "csv":
+        if videos:
+            writer = csv.DictWriter(sys.stdout, fieldnames=["title", "published", "link"])
+            writer.writeheader()
+            writer.writerows(videos)
+    else:  # text format (default)
+        for video in videos:
+            print(f"Title: {video['title']}")
+            print(f"Published: {video['published']}")
+            print(f"Link: {video['link']}\n")
 
 
 if __name__ == "__main__":
@@ -180,8 +263,22 @@ if __name__ == "__main__":
         " --filter_by date --filter_value 2023-10-01",
     )
 
-    # Add argument for YouTube channel URL
-    parser.add_argument("youtube_url", help="The YouTube channel URL")
+    # Add version argument
+    parser.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show program version and exit",
+    )
+
+    # Add argument for YouTube channel URL (made optional if --channel-id is provided)
+    parser.add_argument(
+        "youtube_url", 
+        nargs="?",
+        help="The YouTube channel URL (e.g., https://www.youtube.com/@username or "
+             "https://www.youtube.com/channel/UC...)"
+    )
 
     # Add optional argument for filtering videos by date or title
     parser.add_argument(
@@ -194,38 +291,124 @@ if __name__ == "__main__":
         help="Value to filter videos by (e.g., date in YYYY-MM-DD format or title keyword)",
     )
 
+    # Add optional argument for configurable video limit
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Maximum number of videos to fetch (default: 5)",
+    )
+
+    # Add optional argument for quiet mode
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational messages (only show errors and video information)",
+    )
+
+    # Add optional argument to save RSS URL to file
+    parser.add_argument(
+        "--save-url",
+        metavar="FILENAME",
+        help="Save RSS feed URL to specified file instead of clipboard",
+    )
+
+    # Add optional argument for output format
+    parser.add_argument(
+        "--output",
+        choices=["text", "json", "csv"],
+        default="text",
+        help="Output format for video list (default: text)",
+    )
+
+    # Add optional arguments for date range filtering
+    parser.add_argument(
+        "--after",
+        metavar="DATE",
+        help="Filter videos published after this date (YYYY-MM-DD format)",
+    )
+    parser.add_argument(
+        "--before",
+        metavar="DATE",
+        help="Filter videos published before this date (YYYY-MM-DD format)",
+    )
+
+    # Add optional argument for direct channel ID
+    parser.add_argument(
+        "--channel-id",
+        metavar="ID",
+        help="Directly provide the YouTube channel ID (skips URL parsing)",
+    )
+
     # Parse command-line arguments
     args = parser.parse_args()
 
+    # Validate that either youtube_url or --channel-id is provided
+    if not args.youtube_url and not args.channel_id:
+        parser.error("Either youtube_url or --channel-id must be provided")
+
     # Extract YouTube URL from parsed arguments
     youtube_url = args.youtube_url
+    quiet_mode = args.quiet
 
-    # Fetch the source code of the YouTube page
-    source_code = get_youtube_source_code(youtube_url)
-    if source_code:
-        # Extract the channel ID from the source code
-        channel_id = get_youtube_channel_id(source_code)
-        if channel_id:
-            # Create the RSS feed URL using the channel ID
-            rss_feed_url = create_rss_feed_url(channel_id)
-            if rss_feed_url:
+    # Determine channel ID
+    channel_id = None
+    if args.channel_id:
+        # Use directly provided channel ID
+        channel_id = args.channel_id
+        if not quiet_mode:
+            print(f"Using provided channel ID: {channel_id}")
+    else:
+        # Fetch the source code of the YouTube page
+        source_code = get_youtube_source_code(youtube_url)
+        if source_code:
+            # Extract the channel ID from the source code
+            channel_id = get_youtube_channel_id(source_code)
+        else:
+            print("Error: Could not fetch YouTube page content.")
+            print("Suggestion: Check the URL format (e.g., https://www.youtube.com/channel/CHANNEL_ID)")
+            exit(1)
+
+    if channel_id:
+        # Create the RSS feed URL using the channel ID
+        rss_feed_url = create_rss_feed_url(channel_id)
+        if rss_feed_url:
+            if not quiet_mode:
                 print(f"Channel ID: {channel_id}")
                 print(f"RSS Feed URL: {rss_feed_url}")
-                pyperclip.copy(rss_feed_url)  # Copy RSS feed URL to clipboard
-                print("RSS feed URL has been copied to the clipboard.")
-
-                # Fetch and parse the RSS feed content
-                entries = fetch_rss_feed_content(rss_feed_url)
-                if entries:
-                    # Filter videos based on provided criteria
-                    videos = filter_videos(entries, args.filter_by, args.filter_value)
-                    for video in videos:
-                        print(f"Title: {video['title']}")
-                        print(f"Published: {video['published']}")
-                        print(f"Link: {video['link']}\n")
-                else:
-                    print("Could not fetch RSS feed content.")
+            
+            # Save URL to file or clipboard
+            if args.save_url:
+                try:
+                    with open(args.save_url, "w", encoding="utf-8") as f:
+                        f.write(rss_feed_url)
+                    if not quiet_mode:
+                        print(f"RSS feed URL has been saved to {args.save_url}")
+                except IOError as e:
+                    print(f"Error saving URL to file: {e}")
             else:
-                print("Could not create RSS feed URL.")
+                pyperclip.copy(rss_feed_url)  # Copy RSS feed URL to clipboard
+                if not quiet_mode:
+                    print("RSS feed URL has been copied to the clipboard.")
+
+            # Fetch and parse the RSS feed content
+            entries = fetch_rss_feed_content(rss_feed_url, limit=args.limit)
+            if entries:
+                # Filter videos based on provided criteria
+                videos = filter_videos(
+                    entries, 
+                    args.filter_by, 
+                    args.filter_value,
+                    args.after,
+                    args.before
+                )
+                # Format and display videos
+                format_output(videos, args.output)
+            else:
+                print("Could not fetch RSS feed content.")
         else:
-            print("Channel ID not found.")
+            print("Error: Could not create RSS feed URL from channel ID.")
+    else:
+        print("Error: Channel ID not found in the YouTube page.")
+        print("Suggestion: The URL might be invalid or the page structure has changed.")
