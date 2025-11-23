@@ -330,9 +330,12 @@ def filter_videos(
     filter_value: str | None = None,
     after_date: str | None = None,
     before_date: str | None = None,
+    min_duration: int | None = None,
+    max_duration: int | None = None,
+    include_duration: bool = False,
 ) -> list[dict[str, str]]:
     """
-    Filters videos by date, title, or other metadata.
+    Filters videos by date, title, duration, or other metadata.
     Multiple filters are combined using AND logic.
 
     Args:
@@ -341,33 +344,88 @@ def filter_videos(
         filter_value (str, optional): The value to filter videos by. Defaults to None.
         after_date (str, optional): Filter videos published after this date (YYYY-MM-DD).
         before_date (str, optional): Filter videos published before this date (YYYY-MM-DD).
+        min_duration (int, optional): Filter videos with minimum duration in seconds.
+        max_duration (int, optional): Filter videos with maximum duration in seconds.
+        include_duration (bool): Whether to include duration in the output.
 
     Returns:
         list: A list of dictionaries containing filtered video details.
     """
     filtered_videos = []
     
-    # Parse date range if provided
-    after_dt = datetime.strptime(after_date, "%Y-%m-%d").date() if after_date else None
-    before_dt = datetime.strptime(before_date, "%Y-%m-%d").date() if before_date else None
+    # Parse date range if provided with error handling
+    after_dt = None
+    before_dt = None
+    
+    if after_date:
+        try:
+            after_dt = datetime.strptime(after_date, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"Error: Invalid date format for --after: {after_date}")
+            print("Suggestion: Use YYYY-MM-DD format (e.g., 2023-10-01)")
+            return []
+    
+    if before_date:
+        try:
+            before_dt = datetime.strptime(before_date, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"Error: Invalid date format for --before: {before_date}")
+            print("Suggestion: Use YYYY-MM-DD format (e.g., 2023-10-31)")
+            return []
     
     for entry in param_entries:
         title = entry.find("title").text
         published = entry.find("published").text
         link = entry.find("link")["href"]
-        entry_date = datetime.strptime(published, "%Y-%m-%dT%H:%M:%S%z")
+        
+        # Parse entry date with error handling for different timezone formats
+        try:
+            entry_date = datetime.strptime(published, "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            # Try alternative format without timezone
+            try:
+                entry_date = datetime.strptime(published, "%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                # Skip this entry if we can't parse the date
+                continue
+        
+        # Extract duration from media:group if available
+        duration_seconds = None
+        media_group = entry.find("media:group")
+        if media_group:
+            media_content = media_group.find("media:content")
+            if media_content and media_content.get("duration"):
+                duration_seconds = int(media_content.get("duration"))
+        
+        # Apply duration filters (only if duration information is available)
+        if duration_seconds is not None:
+            if min_duration is not None and duration_seconds < min_duration:
+                continue
+            if max_duration is not None and duration_seconds > max_duration:
+                continue
         
         # Apply date range filters (AND logic)
-        if after_dt and entry_date.date() < after_dt:
-            continue
-        if before_dt and entry_date.date() > before_dt:
-            continue
+        if after_dt:
+            # For after filter, we want videos published strictly after the date (> comparison)
+            # But since we're comparing dates (not datetime), videos on after_date itself should be included
+            if entry_date.date() < after_dt:
+                continue
+        if before_dt:
+            # For before filter, we want videos published strictly before the date
+            # Videos on before_date itself should be excluded
+            if entry_date.date() >= before_dt:
+                continue
 
         # Apply legacy date filter (exact match)
         if filter_by == "date":
-            filter_date = datetime.strptime(filter_value, "%Y-%m-%d")
-            if entry_date.date() != filter_date.date():
-                continue
+            try:
+                filter_date = datetime.strptime(filter_value, "%Y-%m-%d")
+                if entry_date.date() != filter_date.date():
+                    continue
+            except ValueError:
+                print(f"Error: Invalid date format for --filter_value: {filter_value}")
+                print("Suggestion: Use YYYY-MM-DD format (e.g., 2023-10-01)")
+                return []
         
         # Apply title filter (AND logic with date filters)
         if filter_by == "title":
@@ -375,7 +433,18 @@ def filter_videos(
                 continue
         
         # If we made it here, the video passed all filters
-        filtered_videos.append({"title": title, "published": published, "link": link})
+        video_info = {"title": title, "published": published, "link": link}
+        if include_duration and duration_seconds is not None:
+            # Format duration as HH:MM:SS
+            hours = duration_seconds // 3600
+            minutes = (duration_seconds % 3600) // 60
+            seconds = duration_seconds % 60
+            if hours > 0:
+                video_info["duration"] = f"{hours}:{minutes:02d}:{seconds:02d}"
+            else:
+                video_info["duration"] = f"{minutes}:{seconds:02d}"
+        
+        filtered_videos.append(video_info)
     
     return filtered_videos
 
@@ -392,13 +461,17 @@ def format_output(videos: list[dict[str, str]], output_format: str = "text") -> 
         print(json.dumps(videos, indent=2))
     elif output_format == "csv":
         if videos:
-            writer = csv.DictWriter(sys.stdout, fieldnames=["title", "published", "link"])
+            # Dynamically determine CSV headers based on keys in first video
+            fieldnames = list(videos[0].keys())
+            writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(videos)
     else:  # text format (default)
         for video in videos:
             print(f"Title: {video['title']}")
             print(f"Published: {video['published']}")
+            if 'duration' in video:
+                print(f"Duration: {video['duration']}")
             print(f"Link: {video['link']}\n")
 
 
@@ -510,6 +583,25 @@ if __name__ == "__main__":
         help="Clear the channel ID cache and exit",
     )
 
+    # Add optional arguments for duration filtering
+    parser.add_argument(
+        "--min-duration",
+        type=int,
+        metavar="SECONDS",
+        help="Filter videos with minimum duration in seconds",
+    )
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        metavar="SECONDS",
+        help="Filter videos with maximum duration in seconds",
+    )
+    parser.add_argument(
+        "--show-duration",
+        action="store_true",
+        help="Include video duration in the output",
+    )
+
     # Parse command-line arguments
     args = parser.parse_args()
 
@@ -605,7 +697,10 @@ if __name__ == "__main__":
                     args.filter_by, 
                     args.filter_value,
                     args.after,
-                    args.before
+                    args.before,
+                    args.min_duration,
+                    args.max_duration,
+                    args.show_duration,
                 )
                 # Format and display videos
                 format_output(videos, args.output)
