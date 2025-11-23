@@ -35,10 +35,45 @@ import argparse
 import json
 import csv
 import sys
+import time
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup, FeatureNotFound, ResultSet, PageElement, Tag, NavigableString
 import pyperclip
+
+
+def retry_request(func, *args, max_retries=3, backoff_factor=2, **kwargs):
+    """
+    Retry a function with exponential backoff.
+
+    Args:
+        func: The function to retry.
+        max_retries: Maximum number of retry attempts (default: 3).
+        backoff_factor: Multiplier for exponential backoff (default: 2).
+        *args, **kwargs: Arguments to pass to the function.
+
+    Returns:
+        The result of the function if successful, None otherwise.
+    """
+    for attempt in range(max_retries):
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                print(f"Timeout. Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                raise
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                print(f"Connection error. Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                raise
+    return None
 
 
 def get_youtube_source_code(url: str) -> bytes | None:
@@ -52,10 +87,13 @@ def get_youtube_source_code(url: str) -> bytes | None:
         bytes: The content of the YouTube page if the request is successful.
         None: If there is an error fetching the URL.
     """
-    try:
+    def _fetch():
         response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Check for bad status codes
+        response.raise_for_status()
         return response.content
+    
+    try:
+        return retry_request(_fetch)
     except requests.exceptions.Timeout:
         print(f"Error: Request timed out while fetching URL: {url}")
         print("Suggestion: Check your internet connection or try again later.")
@@ -150,11 +188,17 @@ def fetch_rss_feed_content(
         list: A list of BeautifulSoup 'entry' elements representing the videos if successful.
         None: If there is an error fetching the RSS feed or parsing the content.
     """
-    try:
+    def _fetch():
         response = requests.get(feed_url, timeout=10)
         response.raise_for_status()
+        return response.content
+    
+    try:
+        content = retry_request(_fetch)
+        if content is None:
+            return None
         try:
-            soup = BeautifulSoup(response.content, "xml")
+            soup = BeautifulSoup(content, "xml")
         except FeatureNotFound:
             print(
                 "Error: Couldn't find a tree builder with the features you requested: xml."
@@ -191,6 +235,7 @@ def filter_videos(
 ) -> list[dict[str, str]]:
     """
     Filters videos by date, title, or other metadata.
+    Multiple filters are combined using AND logic.
 
     Args:
         param_entries (list): A list of BeautifulSoup 'entry' elements representing the videos.
@@ -214,21 +259,26 @@ def filter_videos(
         link = entry.find("link")["href"]
         entry_date = datetime.strptime(published, "%Y-%m-%dT%H:%M:%S%z")
         
-        # Apply date range filters
+        # Apply date range filters (AND logic)
         if after_dt and entry_date.date() < after_dt:
             continue
         if before_dt and entry_date.date() > before_dt:
             continue
 
-        # Apply legacy filters
+        # Apply legacy date filter (exact match)
         if filter_by == "date":
             filter_date = datetime.strptime(filter_value, "%Y-%m-%d")
-            if entry_date.date() == filter_date.date():
-                filtered_videos.append({"title": title, "published": published, "link": link})
-        elif filter_by == "title" and filter_value.lower() in title.lower():
-            filtered_videos.append({"title": title, "published": published, "link": link})
-        elif not filter_by:
-            filtered_videos.append({"title": title, "published": published, "link": link})
+            if entry_date.date() != filter_date.date():
+                continue
+        
+        # Apply title filter (AND logic with date filters)
+        if filter_by == "title":
+            if filter_value.lower() not in title.lower():
+                continue
+        
+        # If we made it here, the video passed all filters
+        filtered_videos.append({"title": title, "published": published, "link": link})
+    
     return filtered_videos
 
 
@@ -341,6 +391,13 @@ if __name__ == "__main__":
         help="Directly provide the YouTube channel ID (skips URL parsing)",
     )
 
+    # Add optional argument for dry run mode
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be fetched without actually fetching RSS feed",
+    )
+
     # Parse command-line arguments
     args = parser.parse_args()
 
@@ -377,6 +434,25 @@ if __name__ == "__main__":
             if not quiet_mode:
                 print(f"Channel ID: {channel_id}")
                 print(f"RSS Feed URL: {rss_feed_url}")
+            
+            # Dry run mode - show what would be fetched and exit
+            if args.dry_run:
+                print("\n--- DRY RUN MODE ---")
+                print(f"Would fetch up to {args.limit} videos from RSS feed")
+                if args.filter_by:
+                    print(f"Would filter by {args.filter_by}: {args.filter_value}")
+                if args.after:
+                    print(f"Would filter videos after: {args.after}")
+                if args.before:
+                    print(f"Would filter videos before: {args.before}")
+                if args.output != "text":
+                    print(f"Would output in {args.output} format")
+                if args.save_url:
+                    print(f"Would save RSS URL to: {args.save_url}")
+                else:
+                    print("Would copy RSS URL to clipboard")
+                print("--- END DRY RUN ---")
+                sys.exit(0)
             
             # Save URL to file or clipboard
             if args.save_url:
