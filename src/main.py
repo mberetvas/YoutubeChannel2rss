@@ -36,10 +36,108 @@ import json
 import csv
 import sys
 import time
+from pathlib import Path
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup, FeatureNotFound, ResultSet, PageElement, Tag, NavigableString
 import pyperclip
+
+
+def get_cache_file_path() -> Path:
+    """
+    Get the path to the cache file for storing channel ID mappings.
+
+    Returns:
+        Path: The path to the cache file.
+    """
+    cache_dir = Path.home() / ".youtuberss"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / "cache.json"
+
+
+def load_cache() -> dict:
+    """
+    Load the cache from the cache file.
+
+    Returns:
+        dict: The cached channel ID mappings.
+    """
+    cache_file = get_cache_file_path()
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_cache(cache: dict) -> None:
+    """
+    Save the cache to the cache file.
+
+    Args:
+        cache (dict): The cache to save.
+    """
+    cache_file = get_cache_file_path()
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except IOError as e:
+        print(f"Warning: Could not save cache: {e}")
+
+
+def get_cached_channel_id(url: str, use_cache: bool = True) -> str | None:
+    """
+    Get a cached channel ID for a URL if available.
+
+    Args:
+        url (str): The YouTube URL.
+        use_cache (bool): Whether to use the cache.
+
+    Returns:
+        str | None: The cached channel ID if available, None otherwise.
+    """
+    if not use_cache:
+        return None
+    
+    cache = load_cache()
+    cache_entry = cache.get(url)
+    if cache_entry:
+        # Check if cache entry has timestamp and channel_id
+        if isinstance(cache_entry, dict) and "channel_id" in cache_entry:
+            return cache_entry["channel_id"]
+        # Legacy cache format (just the channel ID as a string)
+        return cache_entry
+    return None
+
+
+def cache_channel_id(url: str, channel_id: str) -> None:
+    """
+    Cache a channel ID for a URL.
+
+    Args:
+        url (str): The YouTube URL.
+        channel_id (str): The channel ID.
+    """
+    cache = load_cache()
+    cache[url] = {
+        "channel_id": channel_id,
+        "timestamp": datetime.now().isoformat()
+    }
+    save_cache(cache)
+
+
+def clear_cache() -> None:
+    """
+    Clear the cache file.
+    """
+    cache_file = get_cache_file_path()
+    if cache_file.exists():
+        cache_file.unlink()
+        print(f"Cache cleared: {cache_file}")
+    else:
+        print("No cache file to clear.")
 
 
 def retry_request(func, *args, max_retries=3, backoff_factor=2, **kwargs):
@@ -398,8 +496,27 @@ if __name__ == "__main__":
         help="Show what would be fetched without actually fetching RSS feed",
     )
 
+    # Add optional argument to disable cache
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable channel ID caching",
+    )
+
+    # Add optional argument to clear cache
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear the channel ID cache and exit",
+    )
+
     # Parse command-line arguments
     args = parser.parse_args()
+
+    # Handle cache clearing
+    if args.clear_cache:
+        clear_cache()
+        sys.exit(0)
 
     # Validate that either youtube_url or --channel-id is provided
     if not args.youtube_url and not args.channel_id:
@@ -417,15 +534,26 @@ if __name__ == "__main__":
         if not quiet_mode:
             print(f"Using provided channel ID: {channel_id}")
     else:
-        # Fetch the source code of the YouTube page
-        source_code = get_youtube_source_code(youtube_url)
-        if source_code:
-            # Extract the channel ID from the source code
-            channel_id = get_youtube_channel_id(source_code)
+        # Check cache first
+        use_cache = not args.no_cache
+        channel_id = get_cached_channel_id(youtube_url, use_cache)
+        
+        if channel_id:
+            if not quiet_mode:
+                print(f"Using cached channel ID: {channel_id}")
         else:
-            print("Error: Could not fetch YouTube page content.")
-            print("Suggestion: Check the URL format (e.g., https://www.youtube.com/channel/CHANNEL_ID)")
-            exit(1)
+            # Fetch the source code of the YouTube page
+            source_code = get_youtube_source_code(youtube_url)
+            if source_code:
+                # Extract the channel ID from the source code
+                channel_id = get_youtube_channel_id(source_code)
+                # Cache the channel ID for future use
+                if channel_id and use_cache:
+                    cache_channel_id(youtube_url, channel_id)
+            else:
+                print("Error: Could not fetch YouTube page content.")
+                print("Suggestion: Check the URL format (e.g., https://www.youtube.com/channel/CHANNEL_ID)")
+                sys.exit(1)
 
     if channel_id:
         # Create the RSS feed URL using the channel ID
