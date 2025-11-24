@@ -1,6 +1,7 @@
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 from bs4 import BeautifulSoup
 import requests
+import json
 
 from main import (
     get_youtube_source_code,
@@ -8,6 +9,9 @@ from main import (
     create_rss_feed_url,
     fetch_rss_feed_content,
     filter_videos,
+    format_output,
+    get_cached_channel_id,
+    load_cache,
 )
 
 
@@ -335,3 +339,182 @@ def test_filter_videos_no_filter():
             assert len(result) == 2
             assert result[0]["title"] == "Video 1"
             assert result[1]["title"] == "Video 2"
+
+
+def test_filter_videos_with_date_range():
+    """
+    Test case for filtering videos by date range (after and before).
+
+    This test verifies that the `filter_videos` function correctly filters
+    videos based on the specified date range.
+
+    Steps:
+    1. Define a list of video entries with different publication dates.
+    2. Call the `filter_videos` function with after and before date parameters.
+    3. Assert that only videos within the date range are returned.
+    """
+    entries = [
+        BeautifulSoup(
+            '<entry><title>Video 1</title><published>2023-10-01T00:00:00+00:00</published><link href="https://www.youtube.com/watch?v=video1"/></entry>',
+            "xml",
+        ),
+        BeautifulSoup(
+            '<entry><title>Video 2</title><published>2023-10-05T00:00:00+00:00</published><link href="https://www.youtube.com/watch?v=video2"/></entry>',
+            "xml",
+        ),
+        BeautifulSoup(
+            '<entry><title>Video 3</title><published>2023-10-10T00:00:00+00:00</published><link href="https://www.youtube.com/watch?v=video3"/></entry>',
+            "xml",
+        ),
+    ]
+
+    # Filter videos between Oct 2 and Oct 8
+    result = filter_videos(entries, after_date="2023-10-02", before_date="2023-10-08")
+    assert len(result) == 1
+    assert result[0]["title"] == "Video 2"
+
+
+def test_filter_videos_combined_filters():
+    """
+    Test case for filtering videos with combined filters (title + date range).
+
+    This test verifies that the `filter_videos` function correctly applies
+    multiple filters using AND logic.
+
+    Steps:
+    1. Define a list of video entries with different titles and dates.
+    2. Call the `filter_videos` function with both title and date range filters.
+    3. Assert that only videos matching all criteria are returned.
+    """
+    entries = [
+        BeautifulSoup(
+            '<entry><title>Python Tutorial</title><published>2023-10-05T00:00:00+00:00</published><link href="https://www.youtube.com/watch?v=video1"/></entry>',
+            "xml",
+        ),
+        BeautifulSoup(
+            '<entry><title>Python Advanced</title><published>2023-10-15T00:00:00+00:00</published><link href="https://www.youtube.com/watch?v=video2"/></entry>',
+            "xml",
+        ),
+        BeautifulSoup(
+            '<entry><title>JavaScript Tutorial</title><published>2023-10-05T00:00:00+00:00</published><link href="https://www.youtube.com/watch?v=video3"/></entry>',
+            "xml",
+        ),
+    ]
+
+    # Filter for Python videos after Oct 10
+    result = filter_videos(
+        entries, filter_by="title", filter_value="Python", after_date="2023-10-10"
+    )
+    assert len(result) == 1
+    assert result[0]["title"] == "Python Advanced"
+
+
+def test_format_output_text(capsys):
+    """
+    Test case for formatting video output as text.
+
+    This test verifies that the `format_output` function correctly formats
+    videos in text format.
+    """
+    videos = [
+        {
+            "title": "Video 1",
+            "published": "2023-10-01T00:00:00+00:00",
+            "link": "https://www.youtube.com/watch?v=video1",
+        }
+    ]
+
+    format_output(videos, "text")
+    captured = capsys.readouterr()
+    assert "Title: Video 1" in captured.out
+    assert "Published: 2023-10-01T00:00:00+00:00" in captured.out
+    assert "Link: https://www.youtube.com/watch?v=video1" in captured.out
+
+
+def test_format_output_json(capsys):
+    """
+    Test case for formatting video output as JSON.
+
+    This test verifies that the `format_output` function correctly formats
+    videos in JSON format.
+    """
+    videos = [
+        {
+            "title": "Video 1",
+            "published": "2023-10-01T00:00:00+00:00",
+            "link": "https://www.youtube.com/watch?v=video1",
+        }
+    ]
+
+    format_output(videos, "json")
+    captured = capsys.readouterr()
+    output_data = json.loads(captured.out)
+    assert len(output_data) == 1
+    assert output_data[0]["title"] == "Video 1"
+
+
+def test_format_output_csv(capsys):
+    """
+    Test case for formatting video output as CSV.
+
+    This test verifies that the `format_output` function correctly formats
+    videos in CSV format.
+    """
+    videos = [
+        {
+            "title": "Video 1",
+            "published": "2023-10-01T00:00:00+00:00",
+            "link": "https://www.youtube.com/watch?v=video1",
+        }
+    ]
+
+    format_output(videos, "csv")
+    captured = capsys.readouterr()
+    assert "title,published,link" in captured.out
+    assert "Video 1" in captured.out
+
+
+def test_cache_operations():
+    """
+    Test case for cache operations (save, load, get).
+
+    This test verifies that caching functions work correctly.
+    """
+    test_cache = {
+        "https://www.youtube.com/@test": {
+            "channel_id": "UC_test123",
+            "timestamp": "2023-10-01T00:00:00",
+        }
+    }
+
+    with patch("builtins.open", mock_open(read_data=json.dumps(test_cache))):
+        with patch("pathlib.Path.exists", return_value=True):
+            cache = load_cache()
+            assert "https://www.youtube.com/@test" in cache
+
+            # Test get_cached_channel_id
+            channel_id = get_cached_channel_id("https://www.youtube.com/@test", use_cache=True)
+            assert channel_id == "UC_test123"
+
+            # Test with cache disabled
+            channel_id = get_cached_channel_id(
+                "https://www.youtube.com/@test", use_cache=False
+            )
+            assert channel_id is None
+
+
+def test_get_youtube_channel_id_handle_url():
+    """
+    Test case for extracting channel ID from a @handle URL.
+
+    This test verifies that the function can handle modern YouTube @handle URLs
+    by extracting the channel ID from script tags.
+    """
+    html_source_code = b"""
+    <html>
+        <meta property="og:url" content="https://www.youtube.com/@testhandle">
+        <script>var ytInitialData = {"channel_id":"UC_handletest123"};</script>
+    </html>
+    """
+    result = get_youtube_channel_id(html_source_code)
+    assert result == "UC_handletest123"
